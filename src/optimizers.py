@@ -1,0 +1,178 @@
+"""First-order optimizers as pure numpy parameter updates.
+
+Each optimizer owns its step rule and any state (velocity, moments). The
+training loop still owns the loss and the gradients; it hands a flat list of
+parameter arrays and matching gradients, and the optimizer mutates the
+parameters in place. That split is what lets the same MLP train under SGD,
+momentum, or Adam without changing the backprop code.
+
+Formulas (all elementwise):
+
+- SGD:       θ ← θ − η · g
+- Momentum:  v ← β v + g;  θ ← θ − η · v   (PyTorch-style, no dampening)
+- Adam:      m ← β₁ m + (1−β₁) g
+             v ← β₂ v + (1−β₂) g²
+             m̂ = m / (1−β₁ᵗ),  v̂ = v / (1−β₂ᵗ)
+             θ ← θ − η · m̂ / (√v̂ + ε)
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from typing import Protocol
+
+import numpy as np
+from numpy.typing import NDArray
+
+Array = NDArray[np.float64]
+
+
+class Optimizer(Protocol):
+    def step(self, params: Sequence[Array], grads: Sequence[Array]) -> None: ...
+
+
+def _validate_pairs(params: Sequence[Array], grads: Sequence[Array]) -> None:
+    if len(params) != len(grads):
+        raise ValueError(
+            f"params has {len(params)} tensors but grads has {len(grads)}"
+        )
+    for i, (p, g) in enumerate(zip(params, grads, strict=True)):
+        if p.shape != g.shape:
+            raise ValueError(
+                f"param/grad shape mismatch at index {i}: {p.shape} vs {g.shape}"
+            )
+
+
+class SGD:
+    """Plain gradient descent: θ ← θ − η g."""
+
+    def __init__(self, lr: float = 0.1) -> None:
+        if lr <= 0.0:
+            raise ValueError("lr must be positive")
+        self.lr = float(lr)
+
+    def step(self, params: Sequence[Array], grads: Sequence[Array]) -> None:
+        _validate_pairs(params, grads)
+        for p, g in zip(params, grads, strict=True):
+            p -= self.lr * g
+
+
+class Momentum:
+    """Heavy-ball momentum: accumulates a velocity so steps keep going downhill.
+
+    Helps on elongated valleys where pure SGD zig-zags. Velocity is initialized
+    lazily from the first grad shapes so callers need not pre-register params.
+    """
+
+    def __init__(self, lr: float = 0.05, beta: float = 0.9) -> None:
+        if lr <= 0.0:
+            raise ValueError("lr must be positive")
+        if not 0.0 <= beta < 1.0:
+            raise ValueError("beta must be in [0, 1)")
+        self.lr = float(lr)
+        self.beta = float(beta)
+        self._v: list[Array] | None = None
+
+    def step(self, params: Sequence[Array], grads: Sequence[Array]) -> None:
+        _validate_pairs(params, grads)
+        if self._v is None:
+            self._v = [np.zeros_like(p) for p in params]
+        elif len(self._v) != len(params):
+            raise ValueError("param list length changed between steps")
+        for i, (p, g) in enumerate(zip(params, grads, strict=True)):
+            self._v[i] = self.beta * self._v[i] + g
+            p -= self.lr * self._v[i]
+
+
+class Adam:
+    """Adaptive moment estimation (Kingma & Ba).
+
+    Per-parameter learning rates from the second moment, with bias correction so
+    the early steps are not dominated by zero-initialized m and v. Default
+    β₁=0.9, β₂=0.999, ε=1e-8 match the paper and common library defaults.
+    """
+
+    def __init__(
+        self,
+        lr: float = 0.01,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        eps: float = 1e-8,
+    ) -> None:
+        if lr <= 0.0:
+            raise ValueError("lr must be positive")
+        if not 0.0 <= beta1 < 1.0:
+            raise ValueError("beta1 must be in [0, 1)")
+        if not 0.0 <= beta2 < 1.0:
+            raise ValueError("beta2 must be in [0, 1)")
+        if eps <= 0.0:
+            raise ValueError("eps must be positive")
+        self.lr = float(lr)
+        self.beta1 = float(beta1)
+        self.beta2 = float(beta2)
+        self.eps = float(eps)
+        self._m: list[Array] | None = None
+        self._v: list[Array] | None = None
+        self.t = 0
+
+    def step(self, params: Sequence[Array], grads: Sequence[Array]) -> None:
+        _validate_pairs(params, grads)
+        if self._m is None:
+            self._m = [np.zeros_like(p) for p in params]
+            self._v = [np.zeros_like(p) for p in params]
+        assert self._v is not None
+        if len(self._m) != len(params):
+            raise ValueError("param list length changed between steps")
+
+        self.t += 1
+        # bias correction grows toward 1; without it early steps are tiny
+        bc1 = 1.0 - self.beta1**self.t
+        bc2 = 1.0 - self.beta2**self.t
+        for i, (p, g) in enumerate(zip(params, grads, strict=True)):
+            self._m[i] = self.beta1 * self._m[i] + (1.0 - self.beta1) * g
+            self._v[i] = self.beta2 * self._v[i] + (1.0 - self.beta2) * (g * g)
+            m_hat = self._m[i] / bc1
+            v_hat = self._v[i] / bc2
+            p -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+
+
+def compare_optimizers(
+    X: Array,
+    y: Array,
+    *,
+    factories: dict[str, Callable[[], Optimizer]] | None = None,
+    hidden: tuple[int, ...] = (16,),
+    activation: str = "tanh",
+    epochs: int = 150,
+    batch_size: int = 32,
+    seed: int = 0,
+) -> dict[str, list[float]]:
+    """Train the same MLP under several optimizers; return per-epoch loss curves.
+
+    Each factory builds a fresh optimizer so moment/velocity state never leaks
+    across runs. The same `seed` is reused so init and minibatch order match,
+    isolating the update rule as the only difference.
+    """
+    # late import: optimizers is usable without pulling the full MLP module
+    from src.mlp import fit
+
+    if factories is None:
+        factories = {
+            "sgd": lambda: SGD(lr=0.1),
+            "momentum": lambda: Momentum(lr=0.05, beta=0.9),
+            "adam": lambda: Adam(lr=0.01),
+        }
+    histories: dict[str, list[float]] = {}
+    for name, factory in factories.items():
+        _, history = fit(
+            X,
+            y,
+            hidden=hidden,
+            activation=activation,
+            epochs=epochs,
+            batch_size=batch_size,
+            seed=seed,
+            optimizer=factory(),
+        )
+        histories[name] = history
+    return histories

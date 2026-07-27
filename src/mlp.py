@@ -147,14 +147,17 @@ def fit(
     epochs: int = 200,
     batch_size: int = 32,
     seed: int = 0,
+    optimizer: object | None = None,
 ) -> tuple[MLP, list[float]]:
-    """Train an MLP classifier by minibatch SGD, returning it and the loss curve.
+    """Train an MLP classifier by minibatch descent, returning it and the loss curve.
 
     Inputs are standardized to zero mean and unit variance so one learning rate
     works across features, and the standardizer is stored on the model so it
     consumes raw X at predict time. Labels may be any hashable values; they are
-    mapped to softmax columns and remembered on the model. Returns the trained
-    model and the per-epoch training cross-entropy.
+    mapped to softmax columns and remembered on the model. Pass an `optimizer`
+    from `src.optimizers` (SGD, Momentum, Adam) to swap the update rule; when
+    omitted, plain SGD at `lr` is used. Returns the trained model and the
+    per-epoch training cross-entropy.
     """
     if activation not in ACTIVATIONS:
         raise ValueError(f"unknown activation {activation!r}")
@@ -166,6 +169,11 @@ def fit(
         raise ValueError("batch_size must be positive")
     if any(h <= 0 for h in hidden):
         raise ValueError("hidden layer sizes must be positive")
+
+    # local import keeps the mlp module free of a hard optimizers dependency
+    from src.optimizers import SGD
+
+    opt = optimizer if optimizer is not None else SGD(lr=lr)
 
     Xm, yv = _check_xy(X, y)
     n, d = Xm.shape
@@ -192,7 +200,9 @@ def fit(
         for start in range(0, n, batch_size):
             idx = order[start : start + batch_size]
             xb, yb = Xs[idx], y_onehot[idx]
-            _sgd_step(weights, biases, act, xb, yb, lr)
+            grad_w, grad_b = _backprop(weights, biases, act, xb, yb)
+            # flat list so one optimizer step covers every free parameter
+            opt.step([*weights, *biases], [*grad_w, *grad_b])
         proba = _softmax(_forward_logits(weights, biases, act, Xs))
         history.append(cross_entropy(proba, y_onehot))
 
@@ -252,20 +262,6 @@ def _backprop(
         if i > 0:
             delta = act.backward(zs[i - 1], delta @ weights[i].T)
     return grad_w, grad_b
-
-
-def _sgd_step(
-    weights: list[Array],
-    biases: list[Array],
-    act: _Activation,
-    xb: Array,
-    yb: Array,
-    lr: float,
-) -> None:
-    grad_w, grad_b = _backprop(weights, biases, act, xb, yb)
-    for i in range(len(weights)):
-        weights[i] -= lr * grad_w[i]
-        biases[i] -= lr * grad_b[i]
 
 
 def make_xor(n: int = 400, noise: float = 0.15, seed: int = 0) -> tuple[Array, Array]:

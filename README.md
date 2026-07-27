@@ -35,6 +35,11 @@ Every deep learning framework is, at its core, a graph that records operations a
 - He/Kaiming initialization: variance `2/fan_in` restoring the half of the signal ReLU drops
 - Forward variance profiling across depth: naive `N(0,1)` weights explode; correct scales stay `O(1)`
 - Vanishing activations under mismatched init (Xavier on a deep ReLU stack) measured, not just described
+- First-order optimizers as pure parameter updates decoupled from the loss and backprop
+- Vanilla SGD: θ ← θ − ηg
+- Heavy-ball / Polyak momentum: velocity accumulation that carries steps through elongated valleys
+- Adam (adaptive moment estimation): bias-corrected first and second moments, per-parameter step sizes
+- Fair convergence comparison: same MLP init, same minibatches, only the update rule changes
 
 ## What's implemented
 
@@ -43,6 +48,7 @@ Every deep learning framework is, at its core, a graph that records operations a
 - **Logistic regression + cross-entropy, decision boundary demo**: `src/logreg.py` trains a binary classifier by minibatch SGD, using the fact that the gradient of the mean cross-entropy with respect to the logits is exactly `sigmoid(z) - y`, the same residual form linear regression has. The sigmoid branches on the sign of the logit so `exp` never overflows, and the loss is computed as `softplus(z) - y·z` through `numpy.logaddexp` so a confidently-wrong prediction gives a large finite loss instead of `inf`. `decision_boundary` returns the straight line where the model sits at 50 percent for a two-feature problem, the level set `w·x + b = 0`.
 - **Multilayer perceptron with hand-derived backprop**: `src/mlp.py` stacks affine layers with `tanh` or `relu` and a softmax head, and trains a multiclass classifier by minibatch SGD. The backward pass is written out by hand as one recursion on the per-layer delta rather than delegated to an autodiff engine: the output delta is the `softmax - onehot` residual, each hidden delta is `(delta_next @ W_nextᵀ) ⊙ act'(z)`, and the parameter gradients are `dW = a_prevᵀ @ delta` and `db = Σ delta`. Weights use He init for `relu` and Xavier for `tanh` so the signal variance holds across depth. The gradients are verified against central finite differences to a tight tolerance, and the model learns XOR and a three-arm spiral, targets a single hyperplane provably cannot separate. Ships with `make_xor` and `make_spiral` toy generators.
 - **Activation functions + weight initialization (Xavier/He) and why they matter**: `src/activations.py` is the dedicated treatment of the nonlinearity and the initial scale. Each activation (`linear`, `tanh`, `sigmoid`, `relu`, `leaky_relu`) exposes `forward` and a local `backward(z, grad_out)` that multiplies by `act'(z)`, so a hand-written backprop step can drop it in. Xavier/Glorot draws `N(0, 2/(fan_in+fan_out))` (or the matching uniform bound) to keep both forward and backward variance stable for symmetric activations; He/Kaiming draws `N(0, 2/fan_in)` so a ReLU stack does not quietly die after a few layers. `forward_variance_profile` stacks affine+activation layers from unit-variance noise and returns the per-layer activation variance: naive `N(0,1)` weights explode, He keeps a ReLU stack `O(1)`, and Xavier on the same ReLU stack fades, which is the usual silent failure mode when the scheme and the nonlinearity disagree.
+- **SGD, Momentum, Adam from scratch, convergence compared on the same net**: `src/optimizers.py` implements the three standard first-order update rules as numpy-only classes that own their state (velocity for momentum, bias-corrected moments for Adam) and mutate a flat list of parameter arrays in place. The MLP training loop calls `optimizer.step(params, grads)` after the hand-written backprop pass, so swapping the rule never touches the gradient math. `compare_optimizers` retrains the same architecture on the same data with the same seed for each factory, which keeps init and minibatch order fixed and isolates the update rule; on XOR, all three cut loss, and Adam typically pulls ahead of plain SGD early because its per-parameter rates absorb the uneven scale of the gradient.
 
 ## Usage
 
@@ -102,6 +108,24 @@ model, history = fit(X, y, hidden=(16,), activation="tanh", epochs=300)
 print(accuracy(model, X, y))     # ~1.0; a linear model caps out at 0.75 here
 print(history[0], history[-1])   # cross-entropy falls over training
 print(model.predict_proba(X[:3]))  # per-class probabilities that sum to 1
+```
+
+Train the same net under SGD, momentum, and Adam and compare loss curves:
+
+```python
+from src.mlp import make_xor, fit, accuracy
+from src.optimizers import SGD, Momentum, Adam, compare_optimizers
+
+X, y = make_xor(n=400, seed=0)
+
+# plug any optimizer into the existing MLP trainer
+model, history = fit(X, y, hidden=(16,), epochs=200, optimizer=Adam(lr=0.01))
+print(accuracy(model, X, y), history[0], history[-1])
+
+# same init + minibatches; only the update rule changes
+curves = compare_optimizers(X, y, epochs=150, seed=0)
+for name, h in curves.items():
+    print(name, h[0], "->", h[-1])
 ```
 
 Compare init schemes by watching activation variance with depth:
