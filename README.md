@@ -40,11 +40,11 @@ Every deep learning framework is, at its core, a graph that records operations a
 - Heavy-ball / Polyak momentum: velocity accumulation that carries steps through elongated valleys
 - Adam (adaptive moment estimation): bias-corrected first and second moments, per-parameter step sizes
 - Fair convergence comparison: same MLP init, same minibatches, only the update rule changes
-- Distributional hypothesis: word meaning from co-occurrence context
-- Skip-gram language modeling: predict context words given a center word inside a sliding window
-- Two-matrix word2vec parameterization (center embeddings W_in, context embeddings W_out)
-- Full-softmax training objective with the `softmax − onehot` gradient identity
-- Dense word vectors and cosine nearest-neighbor retrieval as a semantic similarity demo
+- Scaled dot-product attention: `softmax(Q Kᵀ / √d_k) V` with the 1/√d_k temperature from "Attention Is All You Need"
+- Self-attention as Q, K, V linear projections of the same sequence (single head)
+- Causal (autoregressive) masking via lower-triangular boolean masks and `-inf` logits
+- Numerically stable softmax (max-subtraction) so large logits stay finite
+- Attention weight matrices as row-stochastic distributions over keys
 
 ## What's implemented
 
@@ -54,7 +54,7 @@ Every deep learning framework is, at its core, a graph that records operations a
 - **Multilayer perceptron with hand-derived backprop**: `src/mlp.py` stacks affine layers with `tanh` or `relu` and a softmax head, and trains a multiclass classifier by minibatch SGD. The backward pass is written out by hand as one recursion on the per-layer delta rather than delegated to an autodiff engine: the output delta is the `softmax - onehot` residual, each hidden delta is `(delta_next @ W_nextᵀ) ⊙ act'(z)`, and the parameter gradients are `dW = a_prevᵀ @ delta` and `db = Σ delta`. Weights use He init for `relu` and Xavier for `tanh` so the signal variance holds across depth. The gradients are verified against central finite differences to a tight tolerance, and the model learns XOR and a three-arm spiral, targets a single hyperplane provably cannot separate. Ships with `make_xor` and `make_spiral` toy generators.
 - **Activation functions + weight initialization (Xavier/He) and why they matter**: `src/activations.py` is the dedicated treatment of the nonlinearity and the initial scale. Each activation (`linear`, `tanh`, `sigmoid`, `relu`, `leaky_relu`) exposes `forward` and a local `backward(z, grad_out)` that multiplies by `act'(z)`, so a hand-written backprop step can drop it in. Xavier/Glorot draws `N(0, 2/(fan_in+fan_out))` (or the matching uniform bound) to keep both forward and backward variance stable for symmetric activations; He/Kaiming draws `N(0, 2/fan_in)` so a ReLU stack does not quietly die after a few layers. `forward_variance_profile` stacks affine+activation layers from unit-variance noise and returns the per-layer activation variance: naive `N(0,1)` weights explode, He keeps a ReLU stack `O(1)`, and Xavier on the same ReLU stack fades, which is the usual silent failure mode when the scheme and the nonlinearity disagree.
 - **SGD, Momentum, Adam from scratch, convergence compared on the same net**: `src/optimizers.py` implements the three standard first-order update rules as numpy-only classes that own their state (velocity for momentum, bias-corrected moments for Adam) and mutate a flat list of parameter arrays in place. The MLP training loop calls `optimizer.step(params, grads)` after the hand-written backprop pass, so swapping the rule never touches the gradient math. `compare_optimizers` retrains the same architecture on the same data with the same seed for each factory, which keeps init and minibatch order fixed and isolates the update rule; on XOR, all three cut loss, and Adam typically pulls ahead of plain SGD early because its per-parameter rates absorb the uneven scale of the gradient.
-- **Word embeddings (skip-gram) trained on a small corpus, nearest-neighbor demo**: `src/embeddings.py` learns dense vectors by predicting each window neighbor of a center word (skip-gram). Two matrices store center and context embeddings; the score for context o given center c is the dot product `W_out[o] · W_in[c]`, turned into a distribution with a full softmax over the vocabulary. Minibatch SGD minimizes the mean negative log-likelihood, using the closed-form `p − onehot` gradient on the logits (verified against finite differences). After training, `nearest(word, k)` ranks the rest of the vocab by cosine similarity on the center rows. A built-in toy corpus repeats short sentences about capitals, animals, and people so co-occurrence clusters show up in the neighbor lists without any external data.
+- **Scaled dot-product self-attention, single head**: `src/attention.py` implements the Vaswani core formula in plain numpy. `scaled_dot_product_attention(Q, K, V)` builds the score matrix `Q Kᵀ / √d_k`, applies an optional boolean mask (False positions become `-inf` so their softmax weight is zero), row-normalizes with a max-stable softmax, and returns both the weighted values and the attention weights. `SelfAttentionHead` learns three projections `W_q`, `W_k`, `W_v` (and an optional `W_o`) from the same input sequence, so every token can attend over the sequence. `causal_mask` builds the lower-triangular mask used in decoder-style autoregressive models. Tests cover shape contracts, uniform-key averaging, near one-hot retrieval when a query matches one key, the entropy effect of the √d_k scale, causal future-blocking, empty and single-token sequences, and a copy-style retrieval check with identity weights.
 
 ## Usage
 
@@ -134,18 +134,6 @@ for name, h in curves.items():
     print(name, h[0], "->", h[-1])
 ```
 
-Train skip-gram embeddings and query nearest neighbors:
-
-```python
-from src.embeddings import fit, make_toy_corpus, cosine_similarity
-
-model, history = fit(make_toy_corpus(), dim=32, window=2, epochs=100, seed=0)
-print(history[0], "->", history[-1])          # NLL falls over training
-print(model.nearest("paris", k=4))            # other capital cities rise
-print(model.nearest("cat", k=4))              # dog / mouse / cats nearby
-print(cosine_similarity(model.embed("king"), model.embed("queen")))
-```
-
 Compare init schemes by watching activation variance with depth:
 
 ```python
@@ -164,6 +152,28 @@ print(he_normal(64, 64).std())    # ~sqrt(2/64)
 print(forward_variance_profile(10, 64, "relu", "he")[-1])
 print(forward_variance_profile(10, 64, "relu", "xavier")[-1])
 print(forward_variance_profile(6, 64, "linear", "naive")[-1])
+```
+
+Run single-head self-attention on a short sequence:
+
+```python
+import numpy as np
+from src.attention import SelfAttentionHead, causal_mask, scaled_dot_product_attention
+
+# bare formula: Q, K, V already projected
+rng = np.random.default_rng(0)
+q = rng.normal(size=(4, 8))
+k = rng.normal(size=(4, 8))
+v = rng.normal(size=(4, 8))
+out, weights = scaled_dot_product_attention(q, k, v)
+print(out.shape, weights.shape)   # (4, 8), (4, 4); each row of weights sums to 1
+
+# self-attention head: same sequence projects to Q, K, V
+head = SelfAttentionHead(d_model=16, d_k=8, seed=0)
+x = rng.normal(size=(2, 6, 16))    # batch=2, T=6
+result = head.forward(x, mask=causal_mask(6))
+print(result.values.shape)        # (2, 6, 16)
+print(result.weights[0].sum(-1))  # ~[1, 1, 1, 1, 1, 1]
 ```
 
 Differentiate an arbitrary scalar expression:
