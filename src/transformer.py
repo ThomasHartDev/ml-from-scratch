@@ -1,13 +1,15 @@
-"""Minimal transformer encoder block: multi-head attention, FFN, residual, LayerNorm.
+"""Minimal Pre-LN self-attention block: multi-head attention, FFN, residual, LayerNorm.
 
-Pre-LN layout (stable for stacking):
+Forward-only: no backward/grad path. Pre-LN layout (stable for stacking):
 
     y = x + MultiHeadAttn(LayerNorm(x))
     z = y + FFN(LayerNorm(y))
 
 Multi-head attention runs h scaled-dot-product heads on d_k = d_model/h slices,
-concatenates, and projects with W_o. The FFN is a shared two-layer MLP per token.
-Residuals keep a gradient highway; LayerNorm holds the residual-stream scale.
+concatenates, and projects with W_o. Optional causal mask supports decoder-style
+use; omit the mask for bidirectional encoder-style attention. The FFN is a
+shared two-layer MLP per token. Residuals keep a residual stream; LayerNorm
+holds its scale.
 """
 
 from __future__ import annotations
@@ -21,12 +23,20 @@ Array = NDArray[np.float64]
 
 
 def softmax(x: Array, axis: int = -1) -> Array:
+    """Numerically stable softmax. All-(-inf) rows return zeros (no mass)."""
     x = np.asarray(x, dtype=np.float64)
     if x.size == 0:
         return np.zeros_like(x, dtype=np.float64)
-    shifted = x - np.max(x, axis=axis, keepdims=True)
-    exp = np.exp(shifted)
-    return exp / np.sum(exp, axis=axis, keepdims=True)
+    max_x = np.max(x, axis=axis, keepdims=True)
+    # All-masked rows: max is -inf; emit zeros without nan/RuntimeWarning.
+    valid = np.isfinite(max_x)
+    with np.errstate(invalid="ignore"):
+        shifted = np.where(valid, x - max_x, 0.0)
+    exp = np.where(valid, np.exp(shifted), 0.0)
+    denom = np.sum(exp, axis=axis, keepdims=True)
+    out = np.zeros_like(exp)
+    np.divide(exp, denom, out=out, where=denom > 0)
+    return out
 
 
 def causal_mask(seq_len: int) -> Array:
@@ -192,10 +202,11 @@ class FeedForward:
 
 
 class TransformerBlock:
-    """Pre-LN encoder block: residual MHA then residual FFN.
+    """Pre-LN self-attention block: residual MHA then residual FFN.
 
-    `parameters()` flattens submodule + LayerNorm tensors for an external
-    optimizer. Attention weights have shape (..., n_heads, T, T).
+    Forward-only: `parameters()` returns weight tensors for inspection, not a
+    trainable optimizer interface (no backward/grad path). Attention weights
+    have shape (..., n_heads, T, T). Optional causal mask for decoder-style use.
     """
 
     def __init__(

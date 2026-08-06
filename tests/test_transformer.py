@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pytest
 
@@ -9,6 +11,7 @@ from src.transformer import (
     gelu,
     layer_norm,
     scaled_dot_product_attention,
+    softmax,
 )
 
 
@@ -47,6 +50,58 @@ def test_attention_shapes_and_row_stochastic():
     assert out.shape == (2, 5, 8)
     assert w.shape == (2, 5, 5)
     assert np.allclose(w.sum(axis=-1), 1.0)
+
+
+def test_scaled_dot_product_attention_golden():
+    """Core formula: softmax(Q Kᵀ / √d_k) V, with scale load-bearing."""
+    q = np.array([[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]], dtype=np.float64)
+    k = np.array([[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]], dtype=np.float64)
+    v = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float64)
+    d_k = float(q.shape[-1])
+    scores = (q @ k.T) / np.sqrt(d_k)
+    shifted = scores - scores.max(axis=-1, keepdims=True)
+    exp = np.exp(shifted)
+    expected_w = exp / exp.sum(axis=-1, keepdims=True)
+    expected_out = expected_w @ v
+
+    out, w = scaled_dot_product_attention(q, k, v)
+    assert np.allclose(w, expected_w, atol=1e-12)
+    assert np.allclose(out, expected_out, atol=1e-12)
+
+    unscaled = q @ k.T
+    u_shift = unscaled - unscaled.max(axis=-1, keepdims=True)
+    u_exp = np.exp(u_shift)
+    unscaled_w = u_exp / u_exp.sum(axis=-1, keepdims=True)
+    assert not np.allclose(w, unscaled_w, atol=1e-8)
+    assert not np.allclose(out, unscaled_w @ v, atol=1e-8)
+
+
+def test_softmax_all_neg_inf_returns_zeros_without_warning():
+    x = np.full((2, 3), -np.inf)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        y = softmax(x)
+    assert y.shape == (2, 3)
+    assert np.allclose(y, 0.0)
+    assert np.all(np.isfinite(y))
+    assert not any(issubclass(w.category, RuntimeWarning) for w in rec)
+
+
+def test_fully_masked_attention_row_is_zero_finite():
+    q = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
+    k = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
+    v = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
+    # Second query attends to nothing (all keys masked).
+    mask = np.array([[True, True], [False, False]])
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        out, w = scaled_dot_product_attention(q, k, v, mask=mask)
+    assert np.allclose(w[1], 0.0)
+    assert np.allclose(out[1], 0.0)
+    assert np.all(np.isfinite(w))
+    assert np.all(np.isfinite(out))
+    assert w[0].sum() == pytest.approx(1.0)
+    assert not any(issubclass(warn.category, RuntimeWarning) for warn in rec)
 
 
 def test_causal_mask_blocks_future():
