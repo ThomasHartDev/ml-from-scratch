@@ -4,7 +4,7 @@ Core machine-learning and deep-learning building blocks implemented from scratch
 
 ## What this demonstrates
 
-Every deep learning framework is, at its core, a graph that records operations and replays them backward to compute gradients. This repo builds that machinery by hand and then uses it to train models, so the chain rule, backpropagation, and gradient descent are all visible in a few hundred lines you can read end to end. Each concept lands as its own tested module with the intuition and the math written out, working up to a from-scratch multi-head transformer block: the same residual + LayerNorm + attention + FFN layout that stacks into modern language models.
+Every deep learning framework is, at its core, a graph that records operations and replays them backward to compute gradients. This repo builds that machinery by hand and then uses it to train models, so the chain rule, backpropagation, and gradient descent are all visible in a few hundred lines you can read end to end. Each concept lands as its own tested module with the intuition and the math written out, working up to a from-scratch char-level transformer language model that learns to continue a toy sequence.
 
 ## Concepts demonstrated
 
@@ -40,13 +40,12 @@ Every deep learning framework is, at its core, a graph that records operations a
 - Heavy-ball / Polyak momentum: velocity accumulation that carries steps through elongated valleys
 - Adam (adaptive moment estimation): bias-corrected first and second moments, per-parameter step sizes
 - Fair convergence comparison: same MLP init, same minibatches, only the update rule changes
-- Scaled dot-product attention: `softmax(Q Kᵀ / √d_k) V`, including why the scale matters
-- Multi-head self-attention: h parallel heads on `d_model / h` slices, concat, then output projection
-- Causal (autoregressive) masking via `-inf` logits so future positions get zero softmax mass
-- Position-wise feed-forward network (two-layer MLP with GELU) shared across tokens
-- Residual connections as a gradient highway around attention and the FFN
-- Layer normalization on the last feature axis (per-token mean/variance, learnable γ/β)
-- Pre-LN transformer block layout: `x + Sublayer(LayerNorm(x))`, the stable stacking order used in GPT-style models
+- Decoder-only (GPT-style) language modeling: next-token prediction under a causal attention mask
+- Character-level tokenization with a learned token embedding table
+- Learned absolute position embeddings summed into the residual stream
+- Single-head scaled dot-product self-attention with hand-derived backprop through softmax(QKᵀ/√d)V
+- Residual attention + ReLU feed-forward block trained end-to-end with Adam
+- Autoregressive sampling (temperature-controlled) from a trained tiny GPT
 
 ## What's implemented
 
@@ -56,7 +55,7 @@ Every deep learning framework is, at its core, a graph that records operations a
 - **Multilayer perceptron with hand-derived backprop**: `src/mlp.py` stacks affine layers with `tanh` or `relu` and a softmax head, and trains a multiclass classifier by minibatch SGD. The backward pass is written out by hand as one recursion on the per-layer delta rather than delegated to an autodiff engine: the output delta is the `softmax - onehot` residual, each hidden delta is `(delta_next @ W_nextᵀ) ⊙ act'(z)`, and the parameter gradients are `dW = a_prevᵀ @ delta` and `db = Σ delta`. Weights use He init for `relu` and Xavier for `tanh` so the signal variance holds across depth. The gradients are verified against central finite differences to a tight tolerance, and the model learns XOR and a three-arm spiral, targets a single hyperplane provably cannot separate. Ships with `make_xor` and `make_spiral` toy generators.
 - **Activation functions + weight initialization (Xavier/He) and why they matter**: `src/activations.py` is the dedicated treatment of the nonlinearity and the initial scale. Each activation (`linear`, `tanh`, `sigmoid`, `relu`, `leaky_relu`) exposes `forward` and a local `backward(z, grad_out)` that multiplies by `act'(z)`, so a hand-written backprop step can drop it in. Xavier/Glorot draws `N(0, 2/(fan_in+fan_out))` (or the matching uniform bound) to keep both forward and backward variance stable for symmetric activations; He/Kaiming draws `N(0, 2/fan_in)` so a ReLU stack does not quietly die after a few layers. `forward_variance_profile` stacks affine+activation layers from unit-variance noise and returns the per-layer activation variance: naive `N(0,1)` weights explode, He keeps a ReLU stack `O(1)`, and Xavier on the same ReLU stack fades, which is the usual silent failure mode when the scheme and the nonlinearity disagree.
 - **SGD, Momentum, Adam from scratch, convergence compared on the same net**: `src/optimizers.py` implements the three standard first-order update rules as numpy-only classes that own their state (velocity for momentum, bias-corrected moments for Adam) and mutate a flat list of parameter arrays in place. The MLP training loop calls `optimizer.step(params, grads)` after the hand-written backprop pass, so swapping the rule never touches the gradient math. `compare_optimizers` retrains the same architecture on the same data with the same seed for each factory, which keeps init and minibatch order fixed and isolates the update rule; on XOR, all three cut loss, and Adam typically pulls ahead of plain SGD early because its per-parameter rates absorb the uneven scale of the gradient.
-- **Minimal transformer block (multi-head attention + FFN + residual + LayerNorm)**: `src/transformer.py` is one Pre-LN self-attention block (forward-only; no backward/grad path yet). Multi-head attention projects the sequence to Q, K, and V, splits into `n_heads` slices of size `d_k = d_model / h`, runs scaled dot-product attention per head (with optional causal mask), concatenates, and applies `W_o`. The FFN is a position-wise `d_model → 4·d_model → d_model` MLP with GELU. Each sublayer sits inside a residual branch after LayerNorm (`x + Sub(LN(x))`), so a stack of blocks stays finite without Post-LN warmup tricks. Attention weights and `parameters()` (weight tensors for inspection) are returned; training with the MLP optimizers needs a real backward pass, not yet implemented. No positional encodings in this module: inputs are raw token embeddings, so position must be mixed in by the caller if needed.
+- **A tiny char-level transformer that learns to continue a toy sequence**: `src/tiny_gpt.py` is a one-block decoder-only language model over characters. Token and position embeddings feed a causal self-attention head (scores lower-triangular, then softmax and V), a residual ReLU FFN, and a linear vocab head. Next-token cross-entropy is minimized with hand-written gradients through the attention path (including the softmax Jacobian) and the same flat-list Adam optimizer used by the MLP. On a repeating `ABAB…` corpus, loss drops and the model assigns higher logit mass to the correct next character; `generate` samples continuations autoregressively under a temperature.
 
 ## Usage
 
@@ -156,25 +155,24 @@ print(forward_variance_profile(10, 64, "relu", "xavier")[-1])
 print(forward_variance_profile(6, 64, "linear", "naive")[-1])
 ```
 
-Run a Pre-LN transformer block on a short sequence:
+Train a tiny GPT on a toy character sequence and sample a continuation:
 
 ```python
-import numpy as np
-from src.transformer import TransformerBlock, causal_mask, MultiHeadAttention
+from src.tiny_gpt import fit
 
-rng = np.random.default_rng(0)
-x = rng.normal(size=(2, 8, 32))  # batch=2, T=8, d_model=32
+model, tok, history = fit(
+    "AB" * 100,
+    d_model=16,
+    block_size=8,
+    steps=300,
+    lr=0.08,
+    seed=0,
+)
+print(history[0], "->", history[-1])  # cross-entropy falls
 
-block = TransformerBlock(d_model=32, n_heads=4, d_ff=128, seed=0)
-out = block.forward(x, mask=causal_mask(8))
-print(out.values.shape)          # (2, 8, 32)
-print(out.attn_weights.shape)    # (2, 4, 8, 8); rows sum to 1 per head
-print(out.attn_weights[0, 0].sum(-1))
-
-# multi-head alone, no residual or FFN
-mha = MultiHeadAttention(d_model=32, n_heads=4, seed=1)
-y, weights = mha.forward(x)
-print(y.shape, weights.shape)
+prompt = tok.encode("ABA")
+ids = model.generate(prompt.reshape(1, -1), max_new_tokens=8, seed=1)
+print(tok.decode(ids[0]))  # keeps alternating A/B after training
 ```
 
 Differentiate an arbitrary scalar expression:
