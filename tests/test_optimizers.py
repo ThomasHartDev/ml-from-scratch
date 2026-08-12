@@ -4,14 +4,12 @@ import pytest
 from src.mlp import accuracy, fit, make_xor
 from src.optimizers import SGD, Adam, Momentum, compare_optimizers
 
-
 def test_sgd_step_matches_closed_form():
     p = np.array([1.0, -2.0, 3.0])
     g = np.array([0.5, 1.0, -1.0])
     orig = p.copy()
     SGD(lr=0.2).step([p], [g])
     assert np.allclose(p, orig - 0.2 * g)
-
 
 def test_momentum_accumulates_velocity():
     p = np.array([0.0])
@@ -21,10 +19,7 @@ def test_momentum_accumulates_velocity():
     opt.step([p], [np.array([2.0])])  # v = 0.5*2 + 2 = 3, p = -5
     assert p[0] == pytest.approx(-5.0)
 
-
 def test_adam_first_step_bias_corrected():
-    # t=1, m = (1-β1)g, v = (1-β2)g², m̂ = g, v̂ = g²
-    # update = lr * g / (|g| + eps)  → sign(g) * lr / (1 + eps) for |g|=1
     p = np.array([0.0])
     g = np.array([1.0])
     opt = Adam(lr=0.1, beta1=0.9, beta2=0.999, eps=1e-8)
@@ -33,9 +28,7 @@ def test_adam_first_step_bias_corrected():
     assert p[0] == pytest.approx(expected)
     assert opt.t == 1
 
-
 def test_adam_second_moment_shrinks_noisy_steps():
-    # a large spike in g should produce a smaller step once v has warmed up
     p = np.zeros(1)
     opt = Adam(lr=0.1)
     for _ in range(20):
@@ -49,9 +42,7 @@ def test_adam_second_moment_shrinks_noisy_steps():
     opt2.step([p2], [np.array([10.0])])
     spike_delta = abs(p2[0] - before_spike)
     steady_step = abs(pos_after_steady) / 20
-    # spike is 100x the steady grad, but Adam's √v damps the step well below 100x
     assert spike_delta < 100 * steady_step
-
 
 def test_invalid_hyperparams():
     with pytest.raises(ValueError):
@@ -67,7 +58,6 @@ def test_invalid_hyperparams():
     with pytest.raises(ValueError):
         Adam(lr=0.01, eps=0.0)
 
-
 def test_shape_and_length_mismatch_raise():
     p = np.zeros(3)
     with pytest.raises(ValueError):
@@ -75,11 +65,9 @@ def test_shape_and_length_mismatch_raise():
     with pytest.raises(ValueError):
         SGD(lr=0.1).step([p], [np.zeros(3), np.zeros(3)])
 
-
 def test_empty_params_is_noop():
     for opt in (SGD(lr=0.1), Momentum(lr=0.1), Adam(lr=0.01)):
         opt.step([], [])
-
 
 def test_mlp_fit_with_each_optimizer_learns_xor():
     X, y = make_xor(n=400, seed=0)
@@ -95,7 +83,6 @@ def test_mlp_fit_with_each_optimizer_learns_xor():
         assert history[-1] < history[0]
         assert accuracy(model, X, y) > 0.9
 
-
 def test_compare_optimizers_all_descend_and_differ():
     X, y = make_xor(n=300, seed=1)
     histories = compare_optimizers(
@@ -105,13 +92,10 @@ def test_compare_optimizers_all_descend_and_differ():
     for name, h in histories.items():
         assert len(h) == 120
         assert h[-1] < h[0], f"{name} did not reduce loss"
-    # same init/data, different rules → not identical curves
     assert histories["sgd"] != histories["adam"]
     assert histories["sgd"] != histories["momentum"]
 
-
 def test_adam_outpaces_sgd_early_on_xor():
-    # same seed and architecture; Adam's adaptive rates usually pull ahead early
     X, y = make_xor(n=400, seed=2)
     histories = compare_optimizers(
         X,
@@ -124,13 +108,10 @@ def test_adam_outpaces_sgd_early_on_xor():
         epochs=40,
         seed=2,
     )
-    # mid-run checkpoint: Adam should be clearly ahead of plain SGD
     mid = 20
     assert histories["adam"][mid] < histories["sgd"][mid]
 
-
 def test_default_fit_still_uses_sgd():
-    # regression: omit optimizer → same behavior as before (plain SGD)
     X, y = make_xor(n=200, seed=3)
     m1, h1 = fit(X, y, hidden=(8,), epochs=50, lr=0.1, seed=3)
     m2, h2 = fit(

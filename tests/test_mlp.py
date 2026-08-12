@@ -14,7 +14,6 @@ from src.mlp import (
     make_xor,
 )
 
-
 def test_softmax_rows_sum_to_one_and_survive_huge_logits():
     z = np.array([[1000.0, -1000.0, 0.0], [0.0, 0.0, 0.0]])
     p = _softmax(z)
@@ -22,7 +21,6 @@ def test_softmax_rows_sum_to_one_and_survive_huge_logits():
     assert np.all(np.isfinite(p))
     assert p[0, 0] == pytest.approx(1.0)
     assert np.allclose(p[1], 1.0 / 3.0)
-
 
 @pytest.mark.parametrize("activation", ["tanh", "relu"])
 def test_backprop_matches_finite_differences(activation):
@@ -60,13 +58,11 @@ def test_backprop_matches_finite_differences(activation):
             numeric = (hi - lo) / (2.0 * eps)
             assert numeric == pytest.approx(grad_b[layer][j], abs=1e-5)
 
-
 def test_learns_xor_that_a_linear_model_cannot():
     X, y = make_xor(n=400, seed=0)
     model, history = fit(X, y, hidden=(16,), activation="tanh", epochs=300, seed=0)
     assert accuracy(model, X, y) > 0.97
     assert history[-1] < history[0]
-
 
 def test_learns_three_class_spiral():
     X, y = make_spiral(n=600, classes=3, seed=1)
@@ -76,13 +72,11 @@ def test_learns_three_class_spiral():
     assert accuracy(model, X, y) > 0.9
     assert len(history) == 400
 
-
 def test_loss_curve_trends_down():
     X, y = make_xor(n=200, seed=2)
     _, history = fit(X, y, hidden=(8,), epochs=150, seed=2)
     # compare averaged windows so a single noisy epoch can't fail it
     assert np.mean(history[-20:]) < np.mean(history[:20])
-
 
 def test_predict_recovers_original_label_values():
     X, y = make_xor(n=200, seed=0)
@@ -92,7 +86,6 @@ def test_predict_recovers_original_label_values():
     assert set(np.unique(preds)).issubset({7, 42})
     assert accuracy(model, X, y_labeled) > 0.95
 
-
 def test_predict_proba_is_a_distribution():
     X, y = make_spiral(n=300, classes=3, seed=0)
     model, _ = fit(X, y, hidden=(16,), epochs=50, seed=0)
@@ -101,7 +94,6 @@ def test_predict_proba_is_a_distribution():
     assert np.allclose(p.sum(axis=1), 1.0)
     assert np.all(p >= 0.0)
 
-
 def test_constant_feature_does_not_break_standardization():
     X, y = make_xor(n=160, seed=0)
     X = np.hstack([X, np.full((X.shape[0], 1), 5.0)])  # zero-variance column
@@ -109,14 +101,12 @@ def test_constant_feature_does_not_break_standardization():
     assert np.all(np.isfinite(history))
     assert accuracy(model, X, y) > 0.95
 
-
 def test_accepts_1d_input_as_single_feature():
     rng = np.random.default_rng(0)
     x = rng.standard_normal(120)
     y = (x > 0).astype(np.int64)
     model, _ = fit(x, y, hidden=(8,), epochs=200, seed=0)
     assert accuracy(model, x, y) > 0.95
-
 
 def test_deterministic_under_seed():
     X, y = make_xor(n=200, seed=0)
@@ -126,21 +116,17 @@ def test_deterministic_under_seed():
     pairs = zip(m1.weights, m2.weights, strict=True)
     assert all(np.array_equal(a, b) for a, b in pairs)
 
-
 def test_empty_input_raises():
     with pytest.raises(ValueError, match="at least one sample"):
         fit(np.empty((0, 2)), np.array([]), epochs=1)
-
 
 def test_mismatched_lengths_raise():
     with pytest.raises(ValueError, match="rows but"):
         fit(np.zeros((4, 2)), np.zeros(3), epochs=1)
 
-
 def test_single_class_raises():
     with pytest.raises(ValueError, match="two classes"):
         fit(np.zeros((5, 2)), np.zeros(5), epochs=1)
-
 
 @pytest.mark.parametrize(
     "kwargs,match",
@@ -156,7 +142,6 @@ def test_bad_hyperparameters_raise(kwargs, match):
     X, y = make_xor(n=40, seed=0)
     with pytest.raises(ValueError, match=match):
         fit(X, y, **kwargs)
-
 
 def test_model_is_frozen():
     model = MLP(

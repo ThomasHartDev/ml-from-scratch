@@ -1,17 +1,8 @@
-"""Gradient descent over `Value` parameters.
-
-`SGD` holds references to the leaf `Value`s it optimizes and steps each one
-against its accumulated gradient. `momentum` adds a velocity term, the same
-update PyTorch's SGD uses. `zero_grad` must run before each backward pass
-because gradients accumulate rather than overwrite.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Sequence
 
 from .engine import Value
-
 
 class SGD:
     def __init__(
@@ -41,7 +32,6 @@ class SGD:
             else:
                 p.data -= self.lr * p.grad
 
-
 def minimize(
     loss_fn,
     params: Sequence[Value],
@@ -49,7 +39,6 @@ def minimize(
     lr: float = 0.01,
     momentum: float = 0.0,
 ) -> list[float]:
-    """Run `steps` of gradient descent, returning the loss at each step."""
     opt = SGD(params, lr=lr, momentum=momentum)
     history: list[float] = []
     for _ in range(steps):

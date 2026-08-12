@@ -1,21 +1,3 @@
-"""First-order optimizers as pure numpy parameter updates.
-
-Each optimizer owns its step rule and any state (velocity, moments). The
-training loop still owns the loss and the gradients; it hands a flat list of
-parameter arrays and matching gradients, and the optimizer mutates the
-parameters in place. That split is what lets the same MLP train under SGD,
-momentum, or Adam without changing the backprop code.
-
-Formulas (all elementwise):
-
-- SGD:       θ ← θ − η · g
-- Momentum:  v ← β v + g;  θ ← θ − η · v   (PyTorch-style, no dampening)
-- Adam:      m ← β₁ m + (1−β₁) g
-             v ← β₂ v + (1−β₂) g²
-             m̂ = m / (1−β₁ᵗ),  v̂ = v / (1−β₂ᵗ)
-             θ ← θ − η · m̂ / (√v̂ + ε)
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
@@ -26,10 +8,8 @@ from numpy.typing import NDArray
 
 Array = NDArray[np.float64]
 
-
 class Optimizer(Protocol):
     def step(self, params: Sequence[Array], grads: Sequence[Array]) -> None: ...
-
 
 def _validate_pairs(params: Sequence[Array], grads: Sequence[Array]) -> None:
     if len(params) != len(grads):
@@ -42,9 +22,7 @@ def _validate_pairs(params: Sequence[Array], grads: Sequence[Array]) -> None:
                 f"param/grad shape mismatch at index {i}: {p.shape} vs {g.shape}"
             )
 
-
 class SGD:
-    """Plain gradient descent: θ ← θ − η g."""
 
     def __init__(self, lr: float = 0.1) -> None:
         if lr <= 0.0:
@@ -56,13 +34,7 @@ class SGD:
         for p, g in zip(params, grads, strict=True):
             p -= self.lr * g
 
-
 class Momentum:
-    """Heavy-ball momentum: accumulates a velocity so steps keep going downhill.
-
-    Helps on elongated valleys where pure SGD zig-zags. Velocity is initialized
-    lazily from the first grad shapes so callers need not pre-register params.
-    """
 
     def __init__(self, lr: float = 0.05, beta: float = 0.9) -> None:
         if lr <= 0.0:
@@ -83,14 +55,7 @@ class Momentum:
             self._v[i] = self.beta * self._v[i] + g
             p -= self.lr * self._v[i]
 
-
 class Adam:
-    """Adaptive moment estimation (Kingma & Ba).
-
-    Per-parameter learning rates from the second moment, with bias correction so
-    the early steps are not dominated by zero-initialized m and v. Default
-    β₁=0.9, β₂=0.999, ε=1e-8 match the paper and common library defaults.
-    """
 
     def __init__(
         self,
@@ -135,7 +100,6 @@ class Adam:
             v_hat = self._v[i] / bc2
             p -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
 
-
 def compare_optimizers(
     X: Array,
     y: Array,
@@ -147,12 +111,6 @@ def compare_optimizers(
     batch_size: int = 32,
     seed: int = 0,
 ) -> dict[str, list[float]]:
-    """Train the same MLP under several optimizers; return per-epoch loss curves.
-
-    Each factory builds a fresh optimizer so moment/velocity state never leaks
-    across runs. The same `seed` is reused so init and minibatch order match,
-    isolating the update rule as the only difference.
-    """
     # late import: optimizers is usable without pulling the full MLP module
     from src.mlp import fit
 

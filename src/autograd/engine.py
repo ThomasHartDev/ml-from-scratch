@@ -1,16 +1,7 @@
-"""Scalar reverse-mode automatic differentiation.
-
-A `Value` wraps a single float and records the operation that produced it,
-so calling `.backward()` walks the graph in reverse topological order and
-accumulates gradients via the chain rule. This is the mechanism every deep
-learning framework uses, stripped down to scalars so the math stays visible.
-"""
-
 from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable
-
 
 class Value:
     __slots__ = ("data", "grad", "_backward", "_prev", "_op")
@@ -23,7 +14,6 @@ class Value:
     ) -> None:
         self.data = float(data)
         self.grad = 0.0
-        # local backprop closure; leaves keep the no-op
         self._backward: Callable[[], None] = lambda: None
         self._prev: set[Value] = set(_children)
         self._op = _op
@@ -112,7 +102,6 @@ class Value:
         return out
 
     def backward(self) -> None:
-        # reverse topological order so every child's grad is final before use
         topo: list[Value] = []
         visited: set[Value] = set()
 
@@ -153,7 +142,6 @@ class Value:
 
     def __repr__(self) -> str:
         return f"Value(data={self.data:.6g}, grad={self.grad:.6g})"
-
 
 def value_sum(values: Iterable[Value]) -> Value:
     acc = Value(0.0)

@@ -13,10 +13,8 @@ from src.activations import (
     xavier_uniform,
 )
 
-
 def _numeric_deriv(fn, z0: float, eps: float = 1e-6) -> float:
     return (fn(z0 + eps) - fn(z0 - eps)) / (2.0 * eps)
-
 
 @pytest.mark.parametrize("name", sorted(ACTIVATIONS))
 def test_forward_backward_shapes_and_finite(name):
@@ -28,7 +26,6 @@ def test_forward_backward_shapes_and_finite(name):
     assert g.shape == z.shape
     assert np.all(np.isfinite(a))
     assert np.all(np.isfinite(g))
-
 
 @pytest.mark.parametrize(
     "name,points",
@@ -52,13 +49,11 @@ def test_derivative_matches_finite_differences(name, points):
         numeric = _numeric_deriv(_f, z0)
         assert analytic == pytest.approx(numeric, abs=1e-5, rel=1e-4)
 
-
 def test_relu_dead_at_and_below_zero():
     act = get_activation("relu")
     z = np.array([[-2.0, 0.0, 3.0]])
     assert np.allclose(act.forward(z), [[0.0, 0.0, 3.0]])
     assert np.allclose(act.backward(z, np.ones_like(z)), [[0.0, 0.0, 1.0]])
-
 
 def test_leaky_relu_leaks_on_negative():
     act = get_activation("leaky_relu")
@@ -70,7 +65,6 @@ def test_leaky_relu_leaks_on_negative():
     assert g[0, 0] == pytest.approx(0.01)
     assert g[0, 1] == pytest.approx(1.0)
 
-
 def test_sigmoid_stays_in_unit_interval_on_huge_logits():
     act = get_activation("sigmoid")
     z = np.array([[1e3, -1e3, 0.0]])
@@ -80,7 +74,6 @@ def test_sigmoid_stays_in_unit_interval_on_huge_logits():
     assert s[0, 2] == pytest.approx(0.5)
     assert np.all(np.isfinite(s))
 
-
 def test_tanh_range_and_oddness():
     act = get_activation("tanh")
     z = np.array([[-2.0, 0.0, 2.0]])
@@ -89,11 +82,9 @@ def test_tanh_range_and_oddness():
     assert t[0, 0] == pytest.approx(-t[0, 2])
     assert np.all(np.abs(t) <= 1.0 + 1e-12)
 
-
 def test_unknown_activation_lists_choices():
     with pytest.raises(ValueError, match="unknown activation"):
         get_activation("swish")
-
 
 @pytest.mark.parametrize(
     "fn,expected_var",
@@ -105,14 +96,12 @@ def test_unknown_activation_lists_choices():
 def test_normal_init_sample_variance_matches_formula(fn, expected_var):
     fan_in, fan_out = 64, 128
     rng = np.random.default_rng(0)
-    # draw many matrices so sample var converges to the theoretical scale
     samples = np.concatenate(
         [fn(fan_in, fan_out, rng).ravel() for _ in range(40)]
     )
     assert float(np.var(samples)) == pytest.approx(
         expected_var(fan_in, fan_out), rel=0.08
     )
-
 
 def test_xavier_uniform_stays_inside_bound():
     fan_in, fan_out = 50, 30
@@ -122,7 +111,6 @@ def test_xavier_uniform_stays_inside_bound():
     assert np.all(w >= -bound - 1e-12)
     assert np.all(w <= bound + 1e-12)
 
-
 def test_he_uniform_stays_inside_bound():
     fan_in, fan_out = 40, 20
     bound = np.sqrt(6.0 / fan_in)
@@ -130,14 +118,12 @@ def test_he_uniform_stays_inside_bound():
     assert w.shape == (fan_in, fan_out)
     assert np.all(np.abs(w) <= bound + 1e-12)
 
-
 def test_gain_scales_std():
     rng = np.random.default_rng(3)
     base = xavier_normal(80, 80, rng, gain=1.0)
     rng = np.random.default_rng(3)
     scaled = xavier_normal(80, 80, rng, gain=2.0)
     assert float(np.std(scaled)) == pytest.approx(2.0 * float(np.std(base)), rel=0.05)
-
 
 def test_init_weights_dispatch_and_recommended():
     assert recommended_init("relu") == "he"
@@ -153,7 +139,6 @@ def test_init_weights_dispatch_and_recommended():
     w3 = init_weights(10, 5, "naive", np.random.default_rng(0))
     assert w3.shape == (10, 5)
 
-
 def test_bad_fans_and_schemes_raise():
     with pytest.raises(ValueError, match="fan_in"):
         xavier_normal(0, 4)
@@ -164,7 +149,6 @@ def test_bad_fans_and_schemes_raise():
     with pytest.raises(ValueError, match="unknown init"):
         init_weights(4, 4, "orthogonal")  # type: ignore[arg-type]
 
-
 def test_forward_profile_rejects_bad_args():
     with pytest.raises(ValueError, match="n_layers"):
         forward_variance_profile(0, 16, "relu", "he")
@@ -173,25 +157,19 @@ def test_forward_profile_rejects_bad_args():
     with pytest.raises(ValueError, match="n_samples"):
         forward_variance_profile(4, 16, "relu", "he", n_samples=0)
 
-
 def test_naive_init_explodes_variance_with_depth():
-    """Unit-scale weights without the 1/sqrt(fan) factor blow up signal var."""
     vars_naive = forward_variance_profile(
         n_layers=6, width=64, activation="linear", scheme="naive", seed=0
     )
-    # each layer multiplies var by ~width under N(0,1) weights
     assert vars_naive[-1] > 1e6
     assert vars_naive[-1] > vars_naive[0] * 100
-
 
 def test_xavier_keeps_tanh_variance_stable():
     vars_x = forward_variance_profile(
         n_layers=8, width=64, activation="tanh", scheme="xavier", seed=1
     )
-    # tanh is contractive, but should not collapse to machine zero
     assert all(0.01 < v < 2.0 for v in vars_x)
     assert max(vars_x) / min(vars_x) < 20.0
-
 
 def test_he_keeps_relu_variance_stable_while_xavier_fades():
     vars_he = forward_variance_profile(
@@ -200,12 +178,10 @@ def test_he_keeps_relu_variance_stable_while_xavier_fades():
     vars_x = forward_variance_profile(
         n_layers=10, width=64, activation="relu", scheme="xavier", seed=2
     )
-    # He restores the half of the signal ReLU drops; variance stays O(1)
     assert all(0.05 < v < 5.0 for v in vars_he)
     # Xavier under-scales ReLU stacks, so later layers quietly die
     assert vars_x[-1] < vars_he[-1] * 0.5
     assert vars_x[-1] < 0.5
-
 
 def test_profile_length_matches_depth():
     profile = forward_variance_profile(

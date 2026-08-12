@@ -5,10 +5,8 @@ import pytest
 
 from src.autograd import Value, value_sum
 
-
 def numeric_grad(f, x, eps=1e-6):
     return (f(x + eps) - f(x - eps)) / (2 * eps)
-
 
 def test_add_and_mul_grads():
     a = Value(2.0)
@@ -19,15 +17,12 @@ def test_add_and_mul_grads():
     assert a.grad == pytest.approx(-3.0)
     assert b.grad == pytest.approx(a.data + 1.0)
 
-
 def test_shared_node_accumulates():
-    # a used twice: gradients must add, not overwrite
     a = Value(3.0)
     b = a + a
     b.backward()
     assert b.data == pytest.approx(6.0)
     assert a.grad == pytest.approx(2.0)
-
 
 def test_pow_grad_matches_numeric():
     def f(x):
@@ -39,7 +34,6 @@ def test_pow_grad_matches_numeric():
     y.backward()
     assert x.grad == pytest.approx(numeric_grad(f, x0), rel=1e-4)
 
-
 def test_division():
     a = Value(6.0)
     b = Value(3.0)
@@ -48,7 +42,6 @@ def test_division():
     assert c.data == pytest.approx(2.0)
     assert a.grad == pytest.approx(1.0 / 3.0)
     assert b.grad == pytest.approx(-6.0 / 9.0)
-
 
 def test_rsub_and_rtruediv():
     x = Value(4.0)
@@ -61,7 +54,6 @@ def test_rsub_and_rtruediv():
     z.backward()
     assert z.data == pytest.approx(2.0)
     assert x.grad == pytest.approx(-8.0 / 16.0)
-
 
 @pytest.mark.parametrize("fn_name", ["relu", "tanh", "exp", "sigmoid"])
 def test_activation_grads_match_numeric(fn_name):
@@ -76,14 +68,12 @@ def test_activation_grads_match_numeric(fn_name):
         expected = numeric_grad(lambda x: forward(x).data, x0)
         assert v.grad == pytest.approx(expected, rel=1e-4, abs=1e-6)
 
-
 def test_relu_at_zero_is_dead():
     x = Value(0.0)
     y = x.relu()
     y.backward()
     assert y.data == 0.0
     assert x.grad == 0.0
-
 
 def test_log_grad_and_domain():
     x = Value(2.5)
@@ -96,15 +86,11 @@ def test_log_grad_and_domain():
     with pytest.raises(ValueError):
         Value(-1.0).log()
 
-
 def test_pow_rejects_value_exponent():
     with pytest.raises(TypeError):
         Value(2.0) ** Value(3.0)
 
-
 def test_softmax_cross_entropy_matches_numpy():
-    # a real composite: softmax over 3 logits then negative-log-likelihood.
-    # gradient of loss wrt the correct logit should be softmax_i - 1.
     logits = [Value(1.0), Value(2.0), Value(0.5)]
     target = 1
     exps = [z.exp() for z in logits]
@@ -121,9 +107,7 @@ def test_softmax_cross_entropy_matches_numpy():
     np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-8)
     assert loss.data == pytest.approx(-math.log(sm[target]))
 
-
 def test_deep_chain_gradient():
-    # long product chain stresses topo ordering: d/dx x^n = n x^(n-1)
     x = Value(1.1)
     out = x
     for _ in range(9):
@@ -132,9 +116,7 @@ def test_deep_chain_gradient():
     assert out.data == pytest.approx(1.1**10, rel=1e-9)
     assert x.grad == pytest.approx(10 * 1.1**9, rel=1e-6)
 
-
 def test_backward_twice_needs_manual_zero():
-    # gradients accumulate across backward calls unless reset
     a = Value(3.0)
     b = Value(4.0)
 
