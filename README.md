@@ -4,7 +4,7 @@ Core machine-learning and deep-learning building blocks implemented from scratch
 
 ## What this demonstrates
 
-Every deep learning framework is, at its core, a graph that records operations and replays them backward to compute gradients. This repo builds that machinery by hand and then uses it to train models, so the chain rule, backpropagation, and gradient descent are all visible in a few hundred lines you can read end to end. Each concept lands as its own tested module with the intuition and the math written out, working up to a from-scratch attention block that learns a toy task.
+Every deep learning framework is, at its core, a graph that records operations and replays them backward to compute gradients. This repo builds that machinery by hand and then uses it to train models, so the chain rule, backpropagation, and gradient descent are all visible in a few hundred lines you can read end to end. Each concept lands as its own tested module with the intuition and the math written out, working up to a from-scratch multi-head transformer block: the same residual + LayerNorm + attention + FFN layout that stacks into modern language models.
 
 ## Concepts demonstrated
 
@@ -40,11 +40,13 @@ Every deep learning framework is, at its core, a graph that records operations a
 - Heavy-ball / Polyak momentum: velocity accumulation that carries steps through elongated valleys
 - Adam (adaptive moment estimation): bias-corrected first and second moments, per-parameter step sizes
 - Fair convergence comparison: same MLP init, same minibatches, only the update rule changes
-- Scaled dot-product attention: `softmax(Q Kᵀ / √d_k) V` with the 1/√d_k temperature from "Attention Is All You Need"
-- Self-attention as Q, K, V linear projections of the same sequence (single head)
-- Causal (autoregressive) masking via lower-triangular boolean masks and `-inf` logits
-- Numerically stable softmax (max-subtraction) so large logits stay finite
-- Attention weight matrices as row-stochastic distributions over keys
+- Scaled dot-product attention: `softmax(Q Kᵀ / √d_k) V`, including why the scale matters
+- Multi-head self-attention: h parallel heads on `d_model / h` slices, concat, then output projection
+- Causal (autoregressive) masking via `-inf` logits so future positions get zero softmax mass
+- Position-wise feed-forward network (two-layer MLP with GELU) shared across tokens
+- Residual connections as a gradient highway around attention and the FFN
+- Layer normalization on the last feature axis (per-token mean/variance, learnable γ/β)
+- Pre-LN transformer block layout: `x + Sublayer(LayerNorm(x))`, the stable stacking order used in GPT-style models
 
 ## What's implemented
 
@@ -54,7 +56,7 @@ Every deep learning framework is, at its core, a graph that records operations a
 - **Multilayer perceptron with hand-derived backprop**: `src/mlp.py` stacks affine layers with `tanh` or `relu` and a softmax head, and trains a multiclass classifier by minibatch SGD. The backward pass is written out by hand as one recursion on the per-layer delta rather than delegated to an autodiff engine: the output delta is the `softmax - onehot` residual, each hidden delta is `(delta_next @ W_nextᵀ) ⊙ act'(z)`, and the parameter gradients are `dW = a_prevᵀ @ delta` and `db = Σ delta`. Weights use He init for `relu` and Xavier for `tanh` so the signal variance holds across depth. The gradients are verified against central finite differences to a tight tolerance, and the model learns XOR and a three-arm spiral, targets a single hyperplane provably cannot separate. Ships with `make_xor` and `make_spiral` toy generators.
 - **Activation functions + weight initialization (Xavier/He) and why they matter**: `src/activations.py` is the dedicated treatment of the nonlinearity and the initial scale. Each activation (`linear`, `tanh`, `sigmoid`, `relu`, `leaky_relu`) exposes `forward` and a local `backward(z, grad_out)` that multiplies by `act'(z)`, so a hand-written backprop step can drop it in. Xavier/Glorot draws `N(0, 2/(fan_in+fan_out))` (or the matching uniform bound) to keep both forward and backward variance stable for symmetric activations; He/Kaiming draws `N(0, 2/fan_in)` so a ReLU stack does not quietly die after a few layers. `forward_variance_profile` stacks affine+activation layers from unit-variance noise and returns the per-layer activation variance: naive `N(0,1)` weights explode, He keeps a ReLU stack `O(1)`, and Xavier on the same ReLU stack fades, which is the usual silent failure mode when the scheme and the nonlinearity disagree.
 - **SGD, Momentum, Adam from scratch, convergence compared on the same net**: `src/optimizers.py` implements the three standard first-order update rules as numpy-only classes that own their state (velocity for momentum, bias-corrected moments for Adam) and mutate a flat list of parameter arrays in place. The MLP training loop calls `optimizer.step(params, grads)` after the hand-written backprop pass, so swapping the rule never touches the gradient math. `compare_optimizers` retrains the same architecture on the same data with the same seed for each factory, which keeps init and minibatch order fixed and isolates the update rule; on XOR, all three cut loss, and Adam typically pulls ahead of plain SGD early because its per-parameter rates absorb the uneven scale of the gradient.
-- **Scaled dot-product self-attention, single head**: `src/attention.py` implements the Vaswani core formula in plain numpy. `scaled_dot_product_attention(Q, K, V)` builds the score matrix `Q Kᵀ / √d_k`, applies an optional boolean mask (False positions become `-inf` so their softmax weight is zero), row-normalizes with a max-stable softmax, and returns both the weighted values and the attention weights. `SelfAttentionHead` learns three projections `W_q`, `W_k`, `W_v` (and an optional `W_o`) from the same input sequence, so every token can attend over the sequence. `causal_mask` builds the lower-triangular mask used in decoder-style autoregressive models. Tests cover shape contracts, uniform-key averaging, near one-hot retrieval when a query matches one key, the entropy effect of the √d_k scale, causal future-blocking, empty and single-token sequences, and a copy-style retrieval check with identity weights.
+- **Minimal transformer block (multi-head attention + FFN + residual + LayerNorm)**: `src/transformer.py` is one Pre-LN self-attention block (forward-only; no backward/grad path yet). Multi-head attention projects the sequence to Q, K, and V, splits into `n_heads` slices of size `d_k = d_model / h`, runs scaled dot-product attention per head (with optional causal mask), concatenates, and applies `W_o`. The FFN is a position-wise `d_model → 4·d_model → d_model` MLP with GELU. Each sublayer sits inside a residual branch after LayerNorm (`x + Sub(LN(x))`), so a stack of blocks stays finite without Post-LN warmup tricks. Attention weights and `parameters()` (weight tensors for inspection) are returned; training with the MLP optimizers needs a real backward pass, not yet implemented. No positional encodings in this module: inputs are raw token embeddings, so position must be mixed in by the caller if needed.
 
 ## Usage
 
@@ -154,26 +156,25 @@ print(forward_variance_profile(10, 64, "relu", "xavier")[-1])
 print(forward_variance_profile(6, 64, "linear", "naive")[-1])
 ```
 
-Run single-head self-attention on a short sequence:
+Run a Pre-LN transformer block on a short sequence:
 
 ```python
 import numpy as np
-from src.attention import SelfAttentionHead, causal_mask, scaled_dot_product_attention
+from src.transformer import TransformerBlock, causal_mask, MultiHeadAttention
 
-# bare formula: Q, K, V already projected
 rng = np.random.default_rng(0)
-q = rng.normal(size=(4, 8))
-k = rng.normal(size=(4, 8))
-v = rng.normal(size=(4, 8))
-out, weights = scaled_dot_product_attention(q, k, v)
-print(out.shape, weights.shape)   # (4, 8), (4, 4); each row of weights sums to 1
+x = rng.normal(size=(2, 8, 32))  # batch=2, T=8, d_model=32
 
-# self-attention head: same sequence projects to Q, K, V
-head = SelfAttentionHead(d_model=16, d_k=8, seed=0)
-x = rng.normal(size=(2, 6, 16))    # batch=2, T=6
-result = head.forward(x, mask=causal_mask(6))
-print(result.values.shape)        # (2, 6, 16)
-print(result.weights[0].sum(-1))  # ~[1, 1, 1, 1, 1, 1]
+block = TransformerBlock(d_model=32, n_heads=4, d_ff=128, seed=0)
+out = block.forward(x, mask=causal_mask(8))
+print(out.values.shape)          # (2, 8, 32)
+print(out.attn_weights.shape)    # (2, 4, 8, 8); rows sum to 1 per head
+print(out.attn_weights[0, 0].sum(-1))
+
+# multi-head alone, no residual or FFN
+mha = MultiHeadAttention(d_model=32, n_heads=4, seed=1)
+y, weights = mha.forward(x)
+print(y.shape, weights.shape)
 ```
 
 Differentiate an arbitrary scalar expression:
